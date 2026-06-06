@@ -105,8 +105,8 @@ const FLAGGED_WORDS: string[] = [
   'just turned 18', 'fresh 18', 'freshly 18', 'newly 18'
 ];
 
-const log = (...args: any[]) => console.log("[Sweeper]", ...args);
-const logError = (...args: any[]) => console.error("[Sweeper]", ...args);
+const log = (...args: any[]) => console.log("[Sniper]", ...args);
+const logError = (...args: any[]) => console.error("[Sniper]", ...args);
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -116,17 +116,65 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
+// دالة إرسال قوية تجرب عدة طرق (مأخوذة من إضافة AnimalCommands)
+const getMessageActions = () => {
+  const g = (globalThis as any);
+  if (g?.MessageActions && typeof g.MessageActions === "object") return g.MessageActions;
+  const bySendOnly = findByProps("sendMessage");
+  if (bySendOnly) return bySendOnly;
+  const bySendReceive = findByProps("sendMessage", "receiveMessage");
+  if (bySendReceive) return bySendReceive;
+  const byCreate = findByProps("createMessage", "getMessages");
+  if (byCreate) return byCreate;
+  return null;
+};
+
+const sendMessageAggressive = async (channelId: string, content: string): Promise<boolean> => {
+  const MA = getMessageActions();
+  if (!MA) return false;
+
+  const msgObj = { content };
+  const nonce = Date.now().toString();
+
+  const attempts: { fn: () => any; name: string }[] = [
+    { fn: () => MA?.sendMessage?.(channelId, msgObj), name: "sendMessage(channelId, msgObj)" },
+    { fn: () => MA?.sendMessage?.(channelId, msgObj, true), name: "sendMessage(channelId, msgObj, true)" },
+    { fn: () => MA?.sendMessage?.(channelId, msgObj, undefined, { nonce }), name: "sendMessage(channelId, msgObj, undefined, {nonce})" },
+    { fn: () => MA?.createMessage?.(channelId, msgObj), name: "createMessage(channelId, msgObj)" },
+    { fn: () => MA?.createMessage?.(channelId, content), name: "createMessage(channelId, content)" },
+    { fn: () => MA?.createMessage?.(channelId, msgObj, undefined, { nonce }), name: "createMessage(channelId, msgObj, undefined, {nonce})" },
+    { fn: () => MA?.sendMessage?.(channelId, content), name: "sendMessage(channelId, content)" },
+    { fn: () => MA?.sendMessage?.(channelId, content, true), name: "sendMessage(channelId, content, true)" },
+    { fn: () => (MA.default?.createMessage ? MA.default.createMessage(channelId, msgObj) : undefined), name: "MA.default.createMessage" },
+    { fn: () => (MA?.dispatch ? MA.dispatch({ type: "CREATE_MESSAGE", channelId, message: msgObj }) : undefined), name: "MA.dispatch(CREATE_MESSAGE)" },
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      const res = attempt.fn();
+      if (res && typeof (res as any).then === "function") {
+        await res;
+      }
+      log(`Message sent via: ${attempt.name}`);
+      return true;
+    } catch (err) {
+      // تجاهل الخطأ وجرب الطريقة التالية
+    }
+  }
+  return false;
+};
+
 let unregister: (() => void) | null = null;
 
 export default {
   onLoad() {
-    log("Loading Sweeper plugin...");
+    log("Loading Sniper plugin...");
 
     unregister = registerCommand({
       name: "snipe",
       displayName: "snipe",
-      description: "Scan messages from mentioned user in current channel for flagged words.",
-      displayDescription: "Scan messages from mentioned user in current channel for flagged words.",
+      description: "Scan messages from a user in the current channel for flagged words.",
+      displayDescription: "Scan messages from a user in the current channel for flagged words.",
       options: [
         {
           name: "user",
@@ -148,7 +196,7 @@ export default {
       execute: async (args: any[], ctx: any) => {
         try {
           const channel = ctx?.channel;
-          if (!channel) {
+          if (!channel?.id) {
             showToast("Could not find channel.", 1);
             return { content: "❌ Could not find channel.", ephemeral: true };
           }
@@ -161,7 +209,7 @@ export default {
 
           const messageLimit = Math.min(args[1]?.value || 500, 5000);
 
-          showToast(`Scanning current channel...`, 0);
+          showToast(`Scanning ${messageLimit} messages...`, 0);
 
           const messageApi = findByProps("fetchMessages");
           if (!messageApi?.fetchMessages) {
@@ -172,65 +220,75 @@ export default {
           let allMsgs: any[] = [];
           let beforeId: string | null = null;
 
-          // جلب حتى messageLimit رسالة على دفعات
+          // جلب الرسائل
           while (allMsgs.length < messageLimit) {
             const batchLimit = Math.min(100, messageLimit - allMsgs.length);
             const options: any = { limit: batchLimit };
             if (beforeId) options.before = beforeId;
 
             const batch = await messageApi.fetchMessages(channel.id, options);
-            if (!batch || batch.length === 0) break;
+            if (!batch || !Array.isArray(batch) || batch.length === 0) break;
 
             allMsgs = allMsgs.concat(batch);
             beforeId = batch[batch.length - 1]?.id;
-
             if (batch.length < batchLimit) break;
           }
 
+          log(`Fetched ${allMsgs.length} messages`);
+
+          // فلترة رسائل المستخدم المحدد
           const userMsgs = allMsgs.filter((m: any) => m?.author?.id === userId);
-          
+          log(`User ${userId} has ${userMsgs.length} messages in this channel`);
+
           let reportLines: string[] = [];
           const words = FLAGGED_WORDS;
 
           for (const m of userMsgs) {
             if (!m?.content) continue;
-            
             const content: string = m.content.toLowerCase();
             const foundWord = words.find((w) => content.includes(w.toLowerCase()));
-            
             if (foundWord) {
-              const jumpLink = `https://discord.com/channels/${ctx.guild?.id || "@me"}/${channel.id}/${m.id}`;
+              const guildId = ctx?.guild?.id || "@me";
+              const jumpLink = `https://discord.com/channels/${guildId}/${channel.id}/${m.id}`;
               reportLines.push(
-                `<@${userId}> | [Jump](${jumpLink}) | \`${foundWord}\``
+                `<@${userId}>: [Jump](${jumpLink}) - \`${foundWord}\``
               );
             }
           }
 
           if (reportLines.length === 0) {
-            return { content: `✅ No flagged messages found in the last ${allMsgs.length} messages.`, ephemeral: true };
+            await sendMessageAggressive(channel.id, "✅ No flagged messages found.");
+            // نخفي الرد التلقائي لأنه تم الإرسال يدوياً
+            return { content: "", ephemeral: true };
           }
 
+          // تقسيم النتائج لرسائل متعددة (لتجنب حدود الطول)
           const chunks = chunkArray(reportLines, 15);
-          let fullReport = chunks[0].join("\n");
-          
-          if (chunks.length > 1) {
-            fullReport += `\n\n... and ${reportLines.length - 15} more results.`;
+          for (const chunk of chunks) {
+            const msgContent = chunk.join("\n");
+            const sent = await sendMessageAggressive(channel.id, msgContent);
+            if (!sent) {
+              showToast("Failed to send report message.", 1);
+              return { content: "❌ Failed to send report.", ephemeral: true };
+            }
           }
 
-          return { content: fullReport, ephemeral: true };
+          // لا نرسل شيئاً في الرد الظاهري
+          return { content: "", ephemeral: true };
 
         } catch (err) {
           logError("Snipe command error:", err);
-          return { content: "❌ An error occurred while scanning.", ephemeral: true };
+          showToast("An error occurred.", 1);
+          return { content: "❌ Error during scan.", ephemeral: true };
         }
       },
     });
 
-    log("Sweeper plugin loaded successfully");
+    log("Sniper plugin loaded successfully");
   },
 
   onUnload() {
-    log("Unloading Sweeper plugin...");
+    log("Unloading Sniper plugin...");
     if (unregister) {
       try { unregister(); } catch (e) { logError("Error:", e); }
       unregister = null;
