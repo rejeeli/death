@@ -242,7 +242,7 @@ export default {
             return { content: `✅ No flagged messages found.\nScanned: ${allMsgs.length} msgs, ${userMsgs.length} from user.`, ephemeral: true };
           }
 
-          // تقسيم النتائج إلى chunks وإرجاعها ephemeral
+           ephemeral
           const chunks = chunkArray(reportLines, 15);
           let fullReport = chunks[0].join("\n");
           
