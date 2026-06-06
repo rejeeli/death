@@ -1,7 +1,6 @@
 import { registerCommand } from "@vendetta/commands";
 import { findByProps } from "@vendetta/metro";
 import { showToast } from "@vendetta/ui/toasts";
-import { storage } from "@vendetta/plugin";
 
 const FLAGGED_WORDS: string[] = [
   'cp', 'child porn', 'cheese pizza', 'loli', 'shota', 'jailbait',
@@ -116,83 +115,77 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-// البحث عن دالة جلب الرسائل بكل الطرق الممكنة
+// البحث عن دالة جلب الرسائل الحقيقية
 const findFetchFunction = () => {
-  // الطريقة 1: findByProps("fetchMessages")
+  // الطريقة 1: findByProps
   try {
     const api = findByProps("fetchMessages");
     if (api) {
-      const keys = Object.keys(api);
-      log("findByProps fetchMessages keys:", keys);
-      // جرب fetchMessages أولاً
-      if (typeof api.fetchMessages === "function") return api.fetchMessages;
-      // جرب أي دالة فيها fetch و messages
-      for (const key of keys) {
-        if (typeof api[key] === "function" && (key.includes("fetch") || key.includes("get"))) {
-          log("Trying key:", key);
-          return api[key];
+      // ابحث عن أي دالة في الكائن
+      for (const key of Object.keys(api)) {
+        if (typeof api[key] === "function" && (key.toLowerCase().includes("fetch") || key.toLowerCase().includes("get"))) {
+          log(`Found fetch function: ${key}`);
+          return api[key].bind(api);
         }
       }
     }
-  } catch (e) {
-    logError("findByProps fetchMessages failed:", e);
-  }
+  } catch (e) {}
 
-  // الطريقة 2: findByProps("getMessages")
   try {
     const api = findByProps("getMessages");
     if (api) {
-      const keys = Object.keys(api);
-      log("findByProps getMessages keys:", keys);
-      if (typeof api.getMessages === "function") return api.getMessages;
-      for (const key of keys) {
-        if (typeof api[key] === "function" && (key.includes("fetch") || key.includes("get") || key.includes("Message"))) {
-          return api[key];
+      for (const key of Object.keys(api)) {
+        if (typeof api[key] === "function" && (key.toLowerCase().includes("fetch") || key.toLowerCase().includes("get"))) {
+          log(`Found fetch function: ${key}`);
+          return api[key].bind(api);
         }
       }
     }
-  } catch (e) {
-    logError("findByProps getMessages failed:", e);
-  }
+  } catch (e) {}
 
-  // الطريقة 3: findByStoreName("MessageStore")
-  try {
-    const { findByStoreName } = require("@vendetta/metro");
-    const MessageStore = findByStoreName("MessageStore");
-    if (MessageStore) {
-      const keys = Object.keys(MessageStore);
-      log("MessageStore keys:", keys.filter(k => k.includes("fetch") || k.includes("get") || k.includes("Message")));
-      for (const key of keys) {
-        if (typeof MessageStore[key] === "function" && (key.includes("fetch") || key.includes("get"))) {
-          return (channelId: string, options: any) => MessageStore[key](channelId, options);
-        }
-      }
-    }
-  } catch (e) {
-    logError("MessageStore failed:", e);
-  }
-
-  // الطريقة 4: HTTP API مباشرة
   return null;
 };
 
-// دالة جلب الرسائل عبر HTTP API
-const fetchMessagesHTTP = async (channelId: string, limit: number, before?: string | null): Promise<any[]> => {
+// جلب الرسائل عبر REST API
+const fetchMessagesREST = async (channelId: string, limit: number, before?: string | null): Promise<any[]> => {
   try {
-    const { getToken } = findByProps("getToken") || (globalThis as any)?.getToken;
-    const token = getToken ? getToken() : null;
-    if (!token) throw new Error("No token");
+    let token = null;
+    
+    // محاولة الحصول على التوكن
+    try {
+      const authModule = findByProps("getToken");
+      if (authModule?.getToken) token = authModule.getToken();
+    } catch {}
+    
+    if (!token) {
+      try {
+        const g = globalThis as any;
+        if (g?.token) token = g.token;
+      } catch {}
+    }
+
+    if (!token) {
+      logError("No token found for REST API");
+      return [];
+    }
 
     let url = `https://discord.com/api/v9/channels/${channelId}/messages?limit=${limit}`;
     if (before) url += `&before=${before}`;
 
     const res = await fetch(url, {
-      headers: { Authorization: token, "Content-Type": "application/json" },
+      headers: { Authorization: token },
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } catch (e) {
-    logError("HTTP fetch failed:", e);
+
+    if (!res.ok) {
+      logError(`REST API error: ${res.status} ${res.statusText}`);
+      return [];
+    }
+
+    const data = await res.json();
+    log(`REST fetched: ${data?.length || 0} messages`);
+    return Array.isArray(data) ? data : [];
+  } catch (e: any) {
+    logError("REST fetch error:", e?.message);
     return [];
   }
 };
@@ -209,39 +202,32 @@ const getMessageActions = () => {
   return null;
 };
 
-const sendMessageAggressive = async (channelId: string, content: string): Promise<{ success: boolean; method?: string; error?: string }> => {
+const sendMessageAggressive = async (channelId: string, content: string): Promise<boolean> => {
   const MA = getMessageActions();
-  if (!MA) return { success: false, error: "MessageActions not found" };
+  if (!MA) return false;
 
   const msgObj = { content };
   const nonce = Date.now().toString();
 
-  const attempts: { fn: () => any; name: string }[] = [
-    { fn: () => MA?.sendMessage?.(channelId, msgObj), name: "sendMessage(channelId, msgObj)" },
-    { fn: () => MA?.sendMessage?.(channelId, msgObj, true), name: "sendMessage(channelId, msgObj, true)" },
-    { fn: () => MA?.sendMessage?.(channelId, msgObj, undefined, { nonce }), name: "sendMessage(channelId, msgObj, undefined, {nonce})" },
-    { fn: () => MA?.createMessage?.(channelId, msgObj), name: "createMessage(channelId, msgObj)" },
-    { fn: () => MA?.createMessage?.(channelId, content), name: "createMessage(channelId, content)" },
-    { fn: () => MA?.createMessage?.(channelId, msgObj, undefined, { nonce }), name: "createMessage(channelId, msgObj, undefined, {nonce})" },
-    { fn: () => MA?.sendMessage?.(channelId, content), name: "sendMessage(channelId, content)" },
-    { fn: () => MA?.sendMessage?.(channelId, content, true), name: "sendMessage(channelId, content, true)" },
-    { fn: () => (MA.default?.createMessage ? MA.default.createMessage(channelId, msgObj) : undefined), name: "MA.default.createMessage" },
+  const attempts = [
+    () => MA.sendMessage?.(channelId, msgObj),
+    () => MA.sendMessage?.(channelId, msgObj, true),
+    () => MA.sendMessage?.(channelId, msgObj, undefined, { nonce }),
+    () => MA.createMessage?.(channelId, msgObj),
+    () => MA.createMessage?.(channelId, content),
+    () => MA.createMessage?.(channelId, msgObj, undefined, { nonce }),
+    () => MA.sendMessage?.(channelId, content),
+    () => MA.sendMessage?.(channelId, content, true),
   ];
 
-  let lastError = "";
   for (const attempt of attempts) {
     try {
-      const res = attempt.fn();
-      if (res && typeof (res as any).then === "function") {
-        await res;
-      }
-      log(`Message sent via: ${attempt.name}`);
-      return { success: true, method: attempt.name };
-    } catch (err: any) {
-      lastError = `${attempt.name}: ${err?.message || String(err)}`;
-    }
+      const res = attempt();
+      if (res && typeof res.then === "function") await res;
+      return true;
+    } catch {}
   }
-  return { success: false, error: `All attempts failed. Last: ${lastError}` };
+  return false;
 };
 
 let unregister: (() => void) | null = null;
@@ -288,60 +274,50 @@ export default {
           const messageLimit = Math.min(args[1]?.value || 500, 5000);
           showToast(`Scanning...`, 0);
 
-          // البحث عن دالة الجلب
-          const fetchFn = findFetchFunction();
-          
           let allMsgs: any[] = [];
           let beforeId: string | null = null;
 
-          if (fetchFn) {
-            // استخدام الدالة الموجودة
-            log("Using internal fetch function");
-            try {
-              while (allMsgs.length < messageLimit) {
-                const batchLimit = Math.min(100, messageLimit - allMsgs.length);
-                const options: any = { limit: batchLimit };
-                if (beforeId) options.before = beforeId;
+          // جلب الرسائل
+          while (allMsgs.length < messageLimit) {
+            const batchLimit = Math.min(100, messageLimit - allMsgs.length);
+            
+            let batch = await fetchMessagesREST(channel.id, batchLimit, beforeId);
+            
+            if (batch.length === 0) break;
+            allMsgs = allMsgs.concat(batch);
+            beforeId = batch[batch.length - 1]?.id;
+            if (batch.length < batchLimit) break;
+          }
 
-                const batch = await fetchFn(channel.id, options);
-                if (!batch || !Array.isArray(batch) || batch.length === 0) break;
-
-                allMsgs = allMsgs.concat(batch);
-                beforeId = batch[batch.length - 1]?.id;
-                if (batch.length < batchLimit) break;
-              }
-            } catch (e: any) {
-              logError("Internal fetch error:", e?.message);
-              return { content: `❌ Fetch error: ${e?.message || String(e)}`, ephemeral: true };
-            }
-          } else {
-            // استخدام HTTP API
-            log("Using HTTP API fallback");
-            try {
-              while (allMsgs.length < messageLimit) {
-                const batchLimit = Math.min(100, messageLimit - allMsgs.length);
-                const batch = await fetchMessagesHTTP(channel.id, batchLimit, beforeId);
-                if (!batch || batch.length === 0) break;
-
-                allMsgs = allMsgs.concat(batch);
-                beforeId = batch[batch.length - 1]?.id;
-                if (batch.length < batchLimit) break;
-              }
-            } catch (e: any) {
-              logError("HTTP fetch error:", e?.message);
-              return { content: `❌ HTTP fetch error: ${e?.message || String(e)}`, ephemeral: true };
+          // تشخيص
+          log(`Total messages fetched: ${allMsgs.length}`);
+          
+          // فلترة رسائل المستخدم - جرب أكثر من طريقة للوصول لـ author id
+          const userMsgs = allMsgs.filter((m: any) => {
+            const authorId = m?.author?.id || m?.author_id || m?.author?.user_id || "";
+            return authorId === userId;
+          });
+          
+          log(`User ${userId} messages: ${userMsgs.length}`);
+          
+          // عرض أول 3 رسائل للمستخدم للتشخيص
+          if (userMsgs.length > 0) {
+            log("First user messages sample:");
+            for (let i = 0; i < Math.min(3, userMsgs.length); i++) {
+              const m = userMsgs[i];
+              log(`  [${i}] content="${m?.content?.substring(0, 100)}" author=`, m?.author);
             }
           }
 
-          log(`Fetched ${allMsgs.length} messages`);
-
-          const userMsgs = allMsgs.filter((m: any) => m?.author?.id === userId);
           let reportLines: string[] = [];
 
           for (const m of userMsgs) {
-            if (!m?.content) continue;
-            const content: string = m.content.toLowerCase();
-            const foundWord = FLAGGED_WORDS.find((w) => content.includes(w.toLowerCase()));
+            const msgContent = m?.content || "";
+            if (!msgContent) continue;
+            
+            const contentLower = msgContent.toLowerCase();
+            const foundWord = FLAGGED_WORDS.find((w) => contentLower.includes(w.toLowerCase()));
+            
             if (foundWord) {
               const guildId = ctx?.guild?.id || "@me";
               const jumpLink = `https://discord.com/channels/${guildId}/${channel.id}/${m.id}`;
@@ -351,8 +327,12 @@ export default {
             }
           }
 
+          log(`Flagged messages found: ${reportLines.length}`);
+
           if (reportLines.length === 0) {
-            await sendMessageAggressive(channel.id, "✅ No flagged messages found.");
+            // أرسل معلومات التشخيص أيضاً
+            const debugMsg = `✅ No flagged messages found.\nDebug: ${allMsgs.length} msgs fetched, ${userMsgs.length} from user.`;
+            await sendMessageAggressive(channel.id, debugMsg);
             return { content: "", ephemeral: true };
           }
 
@@ -364,8 +344,8 @@ export default {
           return { content: "", ephemeral: true };
 
         } catch (err: any) {
-          logError("Unexpected error:", err?.message, err?.stack);
-          return { content: `❌ ${err?.message || String(err)}`, ephemeral: true };
+          logError("Error:", err?.message, err?.stack);
+          return { content: `❌ ${err?.message || "Unknown error"}`, ephemeral: true };
         }
       },
     });
