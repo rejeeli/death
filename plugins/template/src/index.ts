@@ -115,43 +115,11 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-// البحث عن دالة جلب الرسائل الحقيقية
-const findFetchFunction = () => {
-  // الطريقة 1: findByProps
-  try {
-    const api = findByProps("fetchMessages");
-    if (api) {
-      // ابحث عن أي دالة في الكائن
-      for (const key of Object.keys(api)) {
-        if (typeof api[key] === "function" && (key.toLowerCase().includes("fetch") || key.toLowerCase().includes("get"))) {
-          log(`Found fetch function: ${key}`);
-          return api[key].bind(api);
-        }
-      }
-    }
-  } catch (e) {}
-
-  try {
-    const api = findByProps("getMessages");
-    if (api) {
-      for (const key of Object.keys(api)) {
-        if (typeof api[key] === "function" && (key.toLowerCase().includes("fetch") || key.toLowerCase().includes("get"))) {
-          log(`Found fetch function: ${key}`);
-          return api[key].bind(api);
-        }
-      }
-    }
-  } catch (e) {}
-
-  return null;
-};
-
 // جلب الرسائل عبر REST API
 const fetchMessagesREST = async (channelId: string, limit: number, before?: string | null): Promise<any[]> => {
   try {
     let token = null;
     
-    // محاولة الحصول على التوكن
     try {
       const authModule = findByProps("getToken");
       if (authModule?.getToken) token = authModule.getToken();
@@ -190,46 +158,6 @@ const fetchMessagesREST = async (channelId: string, limit: number, before?: stri
   }
 };
 
-const getMessageActions = () => {
-  const g = (globalThis as any);
-  if (g?.MessageActions && typeof g.MessageActions === "object") return g.MessageActions;
-  const bySendOnly = findByProps("sendMessage");
-  if (bySendOnly) return bySendOnly;
-  const bySendReceive = findByProps("sendMessage", "receiveMessage");
-  if (bySendReceive) return bySendReceive;
-  const byCreate = findByProps("createMessage", "getMessages");
-  if (byCreate) return byCreate;
-  return null;
-};
-
-const sendMessageAggressive = async (channelId: string, content: string): Promise<boolean> => {
-  const MA = getMessageActions();
-  if (!MA) return false;
-
-  const msgObj = { content };
-  const nonce = Date.now().toString();
-
-  const attempts = [
-    () => MA.sendMessage?.(channelId, msgObj),
-    () => MA.sendMessage?.(channelId, msgObj, true),
-    () => MA.sendMessage?.(channelId, msgObj, undefined, { nonce }),
-    () => MA.createMessage?.(channelId, msgObj),
-    () => MA.createMessage?.(channelId, content),
-    () => MA.createMessage?.(channelId, msgObj, undefined, { nonce }),
-    () => MA.sendMessage?.(channelId, content),
-    () => MA.sendMessage?.(channelId, content, true),
-  ];
-
-  for (const attempt of attempts) {
-    try {
-      const res = attempt();
-      if (res && typeof res.then === "function") await res;
-      return true;
-    } catch {}
-  }
-  return false;
-};
-
 let unregister: (() => void) | null = null;
 
 export default {
@@ -253,7 +181,7 @@ export default {
         {
           name: "limit",
           displayName: "limit",
-          description: "Number of messages to scan (max 5000)",
+          description: "Number of messages to scan (max 10000000000)",
           displayDescription: "Number of messages to scan",
           required: false,
           type: 4,
@@ -271,16 +199,14 @@ export default {
             return { content: "❌ Please mention a user.", ephemeral: true };
           }
 
-          const messageLimit = Math.min(args[1]?.value || 500, 5000);
+          const messageLimit = Math.min(args[1]?.value || 500, 10000);
           showToast(`Scanning...`, 0);
 
           let allMsgs: any[] = [];
           let beforeId: string | null = null;
 
-          // جلب الرسائل
           while (allMsgs.length < messageLimit) {
             const batchLimit = Math.min(100, messageLimit - allMsgs.length);
-            
             let batch = await fetchMessagesREST(channel.id, batchLimit, beforeId);
             
             if (batch.length === 0) break;
@@ -289,25 +215,10 @@ export default {
             if (batch.length < batchLimit) break;
           }
 
-          // تشخيص
-          log(`Total messages fetched: ${allMsgs.length}`);
-          
-          // فلترة رسائل المستخدم - جرب أكثر من طريقة للوصول لـ author id
           const userMsgs = allMsgs.filter((m: any) => {
             const authorId = m?.author?.id || m?.author_id || m?.author?.user_id || "";
             return authorId === userId;
           });
-          
-          log(`User ${userId} messages: ${userMsgs.length}`);
-          
-          // عرض أول 3 رسائل للمستخدم للتشخيص
-          if (userMsgs.length > 0) {
-            log("First user messages sample:");
-            for (let i = 0; i < Math.min(3, userMsgs.length); i++) {
-              const m = userMsgs[i];
-              log(`  [${i}] content="${m?.content?.substring(0, 100)}" author=`, m?.author);
-            }
-          }
 
           let reportLines: string[] = [];
 
@@ -327,21 +238,18 @@ export default {
             }
           }
 
-          log(`Flagged messages found: ${reportLines.length}`);
-
           if (reportLines.length === 0) {
-            // أرسل معلومات التشخيص أيضاً
-            const debugMsg = `✅ No flagged messages found.\nDebug: ${allMsgs.length} msgs fetched, ${userMsgs.length} from user.`;
-            await sendMessageAggressive(channel.id, debugMsg);
-            return { content: "", ephemeral: true };
+            return { content: `✅ No flagged messages found.\nScanned: ${allMsgs.length} msgs, ${userMsgs.length} from user.`, ephemeral: true };
           }
 
           const chunks = chunkArray(reportLines, 15);
-          for (const chunk of chunks) {
-            await sendMessageAggressive(channel.id, chunk.join("\n"));
+          let fullReport = chunks[0].join("\n");
+          
+          if (chunks.length > 1) {
+            fullReport += `\n\n... and ${reportLines.length - 15} more results.`;
           }
 
-          return { content: "", ephemeral: true };
+          return { content: fullReport, ephemeral: true };
 
         } catch (err: any) {
           logError("Error:", err?.message, err?.stack);
