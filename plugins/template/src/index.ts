@@ -108,17 +108,125 @@ const FLAGGED_WORDS: string[] = [
 const log = (...args: any[]) => console.log("[Sweeper]", ...args);
 const logError = (...args: any[]) => console.error("[Sweeper]", ...args);
 
-function chunkArray<T>(arr: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size));
-  }
-  return chunks;
-}
+// البحث عن القنوات بجميع الطرق الممكنة
+const getTextChannels = (guildId: string): any[] => {
+  // طريقة 1: findByStoreName("ChannelStore")
+  try {
+    const ChannelStore = findByStoreName("ChannelStore");
+    if (ChannelStore) {
+      // getGuildChannels
+      if (typeof ChannelStore.getGuildChannels === "function") {
+        const channels = ChannelStore.getGuildChannels(guildId);
+        if (channels) {
+          const result = Object.values(channels).filter(
+            (c: any) => c?.type === 0 || c?.type === 5
+          );
+          if (result.length > 0) {
+            log("Method 1 (getGuildChannels):", result.length, "channels");
+            return result;
+          }
+        }
+      }
+      
+      // getChannels
+      if (typeof ChannelStore.getChannels === "function") {
+        const channels = ChannelStore.getChannels();
+        if (channels) {
+          const values = Array.isArray(channels) ? channels : Object.values(channels);
+          const result = values.filter(
+            (c: any) => c?.guild_id === guildId && (c?.type === 0 || c?.type === 5)
+          );
+          if (result.length > 0) {
+            log("Method 2 (getChannels):", result.length, "channels");
+            return result;
+          }
+        }
+      }
 
-const getChannelStore = () => {
-  try { return findByStoreName("ChannelStore"); } catch {}
-  return null;
+      // getMutableGuildChannels
+      if (typeof ChannelStore.getMutableGuildChannels === "function") {
+        const channels = ChannelStore.getMutableGuildChannels(guildId);
+        if (channels) {
+          const values = Array.isArray(channels) ? channels : Object.values(channels);
+          const result = values.filter(
+            (c: any) => c?.type === 0 || c?.type === 5
+          );
+          if (result.length > 0) {
+            log("Method 3 (getMutableGuildChannels):", result.length, "channels");
+            return result;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    logError("ChannelStore methods failed:", e);
+  }
+
+  // طريقة 4: استخدام findByProps للبحث عن channels
+  try {
+    const guildProps = findByProps("getGuild", "getGuilds");
+    if (guildProps?.getGuild) {
+      const guild = guildProps.getGuild(guildId);
+      if (guild?.channels) {
+        const values = Array.isArray(guild.channels) ? guild.channels : Object.values(guild.channels);
+        const result = values.filter(
+          (c: any) => c?.type === 0 || c?.type === 5 || c?.type === "GUILD_TEXT" || c?.type === "GUILD_ANNOUNCEMENT"
+        );
+        if (result.length > 0) {
+          log("Method 4 (getGuild):", result.length, "channels");
+          return result;
+        }
+      }
+    }
+  } catch (e) {
+    logError("getGuild method failed:", e);
+  }
+
+  // طريقة 5: global cache
+  try {
+    const g = globalThis as any;
+    if (g?.__dc_cache?.channels) {
+      const channels = g.__dc_cache.channels;
+      const values = Array.isArray(channels) ? channels : Object.values(channels);
+      const result = values.filter(
+        (c: any) => c?.guild_id === guildId && (c?.type === 0 || c?.type === 5)
+      );
+      if (result.length > 0) {
+        log("Method 5 (global cache):", result.length, "channels");
+        return result;
+      }
+    }
+  } catch {}
+
+  // طريقة 6: استخدام modules المشابهة
+  try {
+    const channelModule = findByProps("getChannel", "hasChannel");
+    if (channelModule) {
+      // نجرب getAllChannels إذا وجدت
+      const allMethods = Object.keys(channelModule).filter(k => 
+        k.toLowerCase().includes("channel") || k.toLowerCase().includes("guild")
+      );
+      log("Available channel methods:", allMethods);
+      
+      for (const method of allMethods) {
+        try {
+          const result = channelModule[method](guildId);
+          if (result && typeof result === "object") {
+            const values = Array.isArray(result) ? result : Object.values(result);
+            const channels = values.filter(
+              (c: any) => c && (c?.type === 0 || c?.type === 5 || c?.guild_id === guildId)
+            );
+            if (channels.length > 0) {
+              log(`Method 6 (${method}):`, channels.length, "channels");
+              return channels;
+            }
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  return [];
 };
 
 let unregister: (() => void) | null = null;
@@ -168,36 +276,12 @@ export default {
 
           const messageLimit = Math.min(args[1]?.value || 500, 5000);
 
-          const ChannelStore = getChannelStore();
-          if (!ChannelStore) {
-            showToast("Could not access channel store.", 1);
-            return { content: "❌ Could not access channel store.", ephemeral: true };
-          }
-
-          let textChannels: any[] = [];
+          const textChannels = getTextChannels(guild.id);
           
-          if (typeof ChannelStore.getGuildChannels === "function") {
-            const guildChannels = ChannelStore.getGuildChannels(guild.id);
-            if (guildChannels) {
-              textChannels = Object.values(guildChannels).filter(
-                (c: any) => c?.type === 0 || c?.type === 5
-              );
-            }
-          }
-          
-          if (textChannels.length === 0 && typeof ChannelStore.getChannels === "function") {
-            const allChannels = ChannelStore.getChannels();
-            if (allChannels) {
-              const allValues = Array.isArray(allChannels) ? allChannels : Object.values(allChannels);
-              textChannels = allValues.filter(
-                (c: any) => c?.guild_id === guild.id && (c?.type === 0 || c?.type === 5)
-              );
-            }
-          }
-
           if (textChannels.length === 0) {
-            showToast("No text channels found.", 1);
-            return { content: "❌ No text channels found.", ephemeral: true };
+            log("Guild ID:", guild.id);
+            showToast("No text channels found. Check console.", 1);
+            return { content: "❌ No text channels found. Check console logs for debug info.", ephemeral: true };
           }
 
           showToast(`Scanning ${textChannels.length} channels...`, 0);
@@ -217,7 +301,6 @@ export default {
                 let allMsgs: any[] = [];
                 let beforeId: string | null = null;
 
-                // جلب حتى 5000 رسالة على دفعات
                 while (allMsgs.length < messageLimit) {
                   const batchLimit = Math.min(100, messageLimit - allMsgs.length);
                   const options: any = { limit: batchLimit };
@@ -257,7 +340,6 @@ export default {
             return { content: `✅ No flagged messages found.`, ephemeral: true };
           }
 
-          // تجميع النتائج في chunks وإرجاعها ephemeral
           const chunks = chunkArray(reportLines, 15);
           let fullReport = chunks[0].join("\n");
           
@@ -285,3 +367,11 @@ export default {
     }
   },
 };
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
+}
