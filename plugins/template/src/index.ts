@@ -1,5 +1,5 @@
 import { registerCommand } from "@vendetta/commands";
-import { findByProps, findByStoreName } from "@vendetta/metro";
+import { findByProps } from "@vendetta/metro";
 import { showToast } from "@vendetta/ui/toasts";
 import { storage } from "@vendetta/plugin";
 
@@ -108,126 +108,13 @@ const FLAGGED_WORDS: string[] = [
 const log = (...args: any[]) => console.log("[Sweeper]", ...args);
 const logError = (...args: any[]) => console.error("[Sweeper]", ...args);
 
-// البحث عن القنوات بجميع الطرق الممكنة
-const getTextChannels = (guildId: string): any[] => {
-  // طريقة 1: findByStoreName("ChannelStore")
-  try {
-    const ChannelStore = findByStoreName("ChannelStore");
-    if (ChannelStore) {
-      // getGuildChannels
-      if (typeof ChannelStore.getGuildChannels === "function") {
-        const channels = ChannelStore.getGuildChannels(guildId);
-        if (channels) {
-          const result = Object.values(channels).filter(
-            (c: any) => c?.type === 0 || c?.type === 5
-          );
-          if (result.length > 0) {
-            log("Method 1 (getGuildChannels):", result.length, "channels");
-            return result;
-          }
-        }
-      }
-      
-      // getChannels
-      if (typeof ChannelStore.getChannels === "function") {
-        const channels = ChannelStore.getChannels();
-        if (channels) {
-          const values = Array.isArray(channels) ? channels : Object.values(channels);
-          const result = values.filter(
-            (c: any) => c?.guild_id === guildId && (c?.type === 0 || c?.type === 5)
-          );
-          if (result.length > 0) {
-            log("Method 2 (getChannels):", result.length, "channels");
-            return result;
-          }
-        }
-      }
-
-      // getMutableGuildChannels
-      if (typeof ChannelStore.getMutableGuildChannels === "function") {
-        const channels = ChannelStore.getMutableGuildChannels(guildId);
-        if (channels) {
-          const values = Array.isArray(channels) ? channels : Object.values(channels);
-          const result = values.filter(
-            (c: any) => c?.type === 0 || c?.type === 5
-          );
-          if (result.length > 0) {
-            log("Method 3 (getMutableGuildChannels):", result.length, "channels");
-            return result;
-          }
-        }
-      }
-    }
-  } catch (e) {
-    logError("ChannelStore methods failed:", e);
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
   }
-
-  // طريقة 4: استخدام findByProps للبحث عن channels
-  try {
-    const guildProps = findByProps("getGuild", "getGuilds");
-    if (guildProps?.getGuild) {
-      const guild = guildProps.getGuild(guildId);
-      if (guild?.channels) {
-        const values = Array.isArray(guild.channels) ? guild.channels : Object.values(guild.channels);
-        const result = values.filter(
-          (c: any) => c?.type === 0 || c?.type === 5 || c?.type === "GUILD_TEXT" || c?.type === "GUILD_ANNOUNCEMENT"
-        );
-        if (result.length > 0) {
-          log("Method 4 (getGuild):", result.length, "channels");
-          return result;
-        }
-      }
-    }
-  } catch (e) {
-    logError("getGuild method failed:", e);
-  }
-
-  // طريقة 5: global cache
-  try {
-    const g = globalThis as any;
-    if (g?.__dc_cache?.channels) {
-      const channels = g.__dc_cache.channels;
-      const values = Array.isArray(channels) ? channels : Object.values(channels);
-      const result = values.filter(
-        (c: any) => c?.guild_id === guildId && (c?.type === 0 || c?.type === 5)
-      );
-      if (result.length > 0) {
-        log("Method 5 (global cache):", result.length, "channels");
-        return result;
-      }
-    }
-  } catch {}
-
-  // طريقة 6: استخدام modules المشابهة
-  try {
-    const channelModule = findByProps("getChannel", "hasChannel");
-    if (channelModule) {
-      // نجرب getAllChannels إذا وجدت
-      const allMethods = Object.keys(channelModule).filter(k => 
-        k.toLowerCase().includes("channel") || k.toLowerCase().includes("guild")
-      );
-      log("Available channel methods:", allMethods);
-      
-      for (const method of allMethods) {
-        try {
-          const result = channelModule[method](guildId);
-          if (result && typeof result === "object") {
-            const values = Array.isArray(result) ? result : Object.values(result);
-            const channels = values.filter(
-              (c: any) => c && (c?.type === 0 || c?.type === 5 || c?.guild_id === guildId)
-            );
-            if (channels.length > 0) {
-              log(`Method 6 (${method}):`, channels.length, "channels");
-              return channels;
-            }
-          }
-        } catch {}
-      }
-    }
-  } catch {}
-
-  return [];
-};
+  return chunks;
+}
 
 let unregister: (() => void) | null = null;
 
@@ -236,117 +123,104 @@ export default {
     log("Loading Sweeper plugin...");
 
     unregister = registerCommand({
-      name: "sweep",
-      displayName: "sweep",
-      description: "Scan messages from mentioned users for flagged words.",
-      displayDescription: "Scan messages from mentioned users for flagged words.",
+      name: "snipe",
+      displayName: "snipe",
+      description: "Scan messages from mentioned user in current channel for flagged words.",
+      displayDescription: "Scan messages from mentioned user in current channel for flagged words.",
       options: [
         {
-          name: "users",
-          displayName: "users",
-          description: "Users to scan",
-          displayDescription: "Users to scan",
+          name: "user",
+          displayName: "user",
+          description: "User to scan",
+          displayDescription: "User to scan",
           required: true,
           type: 6,
         },
         {
           name: "limit",
           displayName: "limit",
-          description: "Number of messages to scan per channel (max 5000)",
-          displayDescription: "Number of messages to scan per channel",
+          description: "Number of messages to scan (max 5000)",
+          displayDescription: "Number of messages to scan",
           required: false,
           type: 4,
         },
       ],
       execute: async (args: any[], ctx: any) => {
         try {
-          const guild = ctx?.guild;
-          if (!guild) {
-            showToast("This command only works in servers.", 1);
-            return { content: "❌ This command only works in servers.", ephemeral: true };
+          const channel = ctx?.channel;
+          if (!channel) {
+            showToast("Could not find channel.", 1);
+            return { content: "❌ Could not find channel.", ephemeral: true };
           }
 
-          const userIds: string[] = [];
-          if (args[0]?.value) userIds.push(args[0].value);
-          
-          if (userIds.length === 0) {
-            showToast("Please mention at least one user.", 1);
-            return { content: "❌ Please mention at least one user.", ephemeral: true };
+          const userId = args[0]?.value;
+          if (!userId) {
+            showToast("Please mention a user.", 1);
+            return { content: "❌ Please mention a user.", ephemeral: true };
           }
 
           const messageLimit = Math.min(args[1]?.value || 500, 5000);
 
-          const textChannels = getTextChannels(guild.id);
-          
-          
+          showToast(`Scanning current channel...`, 0);
 
-          showToast(`Scanning ${textChannels.length} channels...`, 0);
+          const messageApi = findByProps("fetchMessages");
+          if (!messageApi?.fetchMessages) {
+            showToast("Could not access message API.", 1);
+            return { content: "❌ Could not access message API.", ephemeral: true };
+          }
 
+          let allMsgs: any[] = [];
+          let beforeId: string | null = null;
+
+          // جلب حتى messageLimit رسالة على دفعات
+          while (allMsgs.length < messageLimit) {
+            const batchLimit = Math.min(100, messageLimit - allMsgs.length);
+            const options: any = { limit: batchLimit };
+            if (beforeId) options.before = beforeId;
+
+            const batch = await messageApi.fetchMessages(channel.id, options);
+            if (!batch || batch.length === 0) break;
+
+            allMsgs = allMsgs.concat(batch);
+            beforeId = batch[batch.length - 1]?.id;
+
+            if (batch.length < batchLimit) break;
+          }
+
+          const userMsgs = allMsgs.filter((m: any) => m?.author?.id === userId);
+          
           let reportLines: string[] = [];
-          let totalFound = 0;
           const words = FLAGGED_WORDS;
 
-          for (const userId of userIds) {
-            for (const ch of textChannels) {
-              try {
-                if (!ch?.id) continue;
-                
-                const messageApi = findByProps("fetchMessages");
-                if (!messageApi?.fetchMessages) continue;
-
-                let allMsgs: any[] = [];
-                let beforeId: string | null = null;
-
-                while (allMsgs.length < messageLimit) {
-                  const batchLimit = Math.min(100, messageLimit - allMsgs.length);
-                  const options: any = { limit: batchLimit };
-                  if (beforeId) options.before = beforeId;
-
-                  const batch = await messageApi.fetchMessages(ch.id, options);
-                  if (!batch || batch.length === 0) break;
-
-                  allMsgs = allMsgs.concat(batch);
-                  beforeId = batch[batch.length - 1]?.id;
-                  
-                  if (batch.length < batchLimit) break;
-                }
-
-                const userMsgs = allMsgs.filter((m: any) => m?.author?.id === userId);
-
-                for (const m of userMsgs) {
-                  if (!m?.content) continue;
-                  
-                  const content: string = m.content.toLowerCase();
-                  const foundWord = words.find((w) => content.includes(w.toLowerCase()));
-                  
-                  if (foundWord) {
-                    const channelName = ch?.name || "unknown";
-                    const jumpLink = `https://discord.com/channels/${guild.id}/${ch.id}/${m.id}`;
-                    reportLines.push(
-                      `<@${userId}> | #${channelName} | [Jump](${jumpLink}) | \`${foundWord}\``
-                    );
-                    totalFound++;
-                  }
-                }
-              } catch (e) {}
+          for (const m of userMsgs) {
+            if (!m?.content) continue;
+            
+            const content: string = m.content.toLowerCase();
+            const foundWord = words.find((w) => content.includes(w.toLowerCase()));
+            
+            if (foundWord) {
+              const jumpLink = `https://discord.com/channels/${ctx.guild?.id || "@me"}/${channel.id}/${m.id}`;
+              reportLines.push(
+                `<@${userId}> | [Jump](${jumpLink}) | \`${foundWord}\``
+              );
             }
           }
 
           if (reportLines.length === 0) {
-            return { content: `✅ No flagged messages found.`, ephemeral: true };
+            return { content: `✅ No flagged messages found in the last ${allMsgs.length} messages.`, ephemeral: true };
           }
 
           const chunks = chunkArray(reportLines, 15);
           let fullReport = chunks[0].join("\n");
           
           if (chunks.length > 1) {
-            fullReport += `\n\n... and ${totalFound - 15} more results.`;
+            fullReport += `\n\n... and ${reportLines.length - 15} more results.`;
           }
 
           return { content: fullReport, ephemeral: true };
 
         } catch (err) {
-          logError("Sweep command error:", err);
+          logError("Snipe command error:", err);
           return { content: "❌ An error occurred while scanning.", ephemeral: true };
         }
       },
@@ -363,11 +237,3 @@ export default {
     }
   },
 };
-
-function chunkArray<T>(arr: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size));
-  }
-  return chunks;
-}
