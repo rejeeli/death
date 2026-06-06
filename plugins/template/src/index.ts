@@ -115,7 +115,6 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-// جلب الرسائل عبر REST API
 const fetchMessagesREST = async (channelId: string, limit: number, before?: string | null): Promise<any[]> => {
   try {
     let token = null;
@@ -158,6 +157,46 @@ const fetchMessagesREST = async (channelId: string, limit: number, before?: stri
   }
 };
 
+const getMessageActions = () => {
+  const g = (globalThis as any);
+  if (g?.MessageActions && typeof g.MessageActions === "object") return g.MessageActions;
+  const bySendOnly = findByProps("sendMessage");
+  if (bySendOnly) return bySendOnly;
+  const bySendReceive = findByProps("sendMessage", "receiveMessage");
+  if (bySendReceive) return bySendReceive;
+  const byCreate = findByProps("createMessage", "getMessages");
+  if (byCreate) return byCreate;
+  return null;
+};
+
+const sendMessageAggressive = async (channelId: string, content: string): Promise<boolean> => {
+  const MA = getMessageActions();
+  if (!MA) return false;
+
+  const msgObj = { content };
+  const nonce = Date.now().toString();
+
+  const attempts = [
+    () => MA.sendMessage?.(channelId, msgObj),
+    () => MA.sendMessage?.(channelId, msgObj, true),
+    () => MA.sendMessage?.(channelId, msgObj, undefined, { nonce }),
+    () => MA.createMessage?.(channelId, msgObj),
+    () => MA.createMessage?.(channelId, content),
+    () => MA.createMessage?.(channelId, msgObj, undefined, { nonce }),
+    () => MA.sendMessage?.(channelId, content),
+    () => MA.sendMessage?.(channelId, content, true),
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      const res = attempt();
+      if (res && typeof res.then === "function") await res;
+      return true;
+    } catch {}
+  }
+  return false;
+};
+
 let unregister: (() => void) | null = null;
 
 export default {
@@ -191,15 +230,15 @@ export default {
         try {
           const channel = ctx?.channel;
           if (!channel?.id) {
-            return { content: "❌ Channel not found.", ephemeral: true };
+            return { content: "❌ Channel not found." };
           }
 
           const userId = args[0]?.value;
           if (!userId) {
-            return { content: "❌ Please mention a user.", ephemeral: true };
+            return { content: "❌ Please mention a user." };
           }
 
-          const messageLimit = Math.min(args[1]?.value || 500, 10000);
+          const messageLimit = Math.min(args[1]?.value || 500, 10000000000);
           showToast(`Scanning...`, 0);
 
           let allMsgs: any[] = [];
@@ -239,21 +278,21 @@ export default {
           }
 
           if (reportLines.length === 0) {
-            return { content: `✅ No flagged messages found.\nScanned: ${allMsgs.length} msgs, ${userMsgs.length} from user.`, ephemeral: true };
+            const debugMsg = `✅ No flagged messages found.\nScanned: ${allMsgs.length} msgs, ${userMsgs.length} from user.`;
+            await sendMessageAggressive(channel.id, debugMsg);
+            return { content: "" };
           }
 
           const chunks = chunkArray(reportLines, 15);
-          let fullReport = chunks[0].join("\n");
-          
-          if (chunks.length > 1) {
-            fullReport += `\n\n... and ${reportLines.length - 15} more results.`;
+          for (const chunk of chunks) {
+            await sendMessageAggressive(channel.id, chunk.join("\n"));
           }
 
-          return { content: fullReport, ephemeral: true };
+          return { content: "" };
 
         } catch (err: any) {
           logError("Error:", err?.message, err?.stack);
-          return { content: `❌ ${err?.message || "Unknown error"}`, ephemeral: true };
+          return { content: `❌ ${err?.message || "Unknown error"}` };
         }
       },
     });
