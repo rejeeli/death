@@ -1,7 +1,8 @@
-const { Plugin } = require('powercord/entities');
-const { getModule } = require('powercord/webpack');
+import { findByProps } from "@vendetta/metro";
+import { commands } from "@vendetta/metro/common";
+import { showToast } from "@vendetta/ui/toasts";
 
-const FLAGGED_WORDS = [
+const FLAGGED_WORDS: string[] = [
   'cp',
   'child porn',
   'cheese pizza',
@@ -466,88 +467,109 @@ const FLAGGED_WORDS = [
   'newly 18'
 ];
 
-function chunkArray(arr, size) {
-  const chunks = [];
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const chunks: T[][] = [];
   for (let i = 0; i < arr.length; i += size) {
     chunks.push(arr.slice(i, i + size));
   }
   return chunks;
 }
 
-module.exports = class SweepPlugin extends Plugin {
-  async startPlugin() {
-    this.registerCommand('sweep', {
-      description: 'Scan messages from mentioned users for flagged words.',
-      usage: '{c} @user1 @user2 [limit]',
-      executor: this.sweepCommand.bind(this)
-    });
-  }
+const messageApi = findByProps("fetchMessages");
 
-  pluginWillUnload() {}
+export default {
+  onLoad: () => {
+    commands.registerCommand({
+      name: "sweep",
+      displayName: "sweep",
+      description: "Scan messages from mentioned users for flagged words.",
+      displayDescription: "Scan messages from mentioned users for flagged words.",
+      options: [
+        {
+          name: "users",
+          displayName: "users",
+          description: "Users to scan",
+          displayDescription: "Users to scan",
+          required: true,
+          type: 6 // USER type
+        },
+        {
+          name: "limit",
+          displayName: "limit",
+          description: "Number of messages to scan per channel",
+          displayDescription: "Number of messages to scan per channel",
+          required: false,
+          type: 4 // INTEGER type
+        }
+      ],
+      execute: async (args: any[], ctx: any) => {
+        const guild = ctx.guild;
+        if (!guild) {
+          showToast("This command only works in servers.", 1);
+          return;
+        }
 
-  async sweepCommand(args, msg) {
-    if (!msg.guild) {
-      return { send: true, result: 'This command only works in servers.' };
-    }
-    if (msg.mentions.length === 0) {
-      return { send: true, result: 'Please mention at least one user.' };
-    }
+        const userIds: string[] = args[0]?.value ? [args[0].value] : [];
+        if (userIds.length === 0) {
+          showToast("Please mention at least one user.", 1);
+          return;
+        }
 
-    const guild = msg.guild;
-    const channel = msg.channel;
-    const users = msg.mentions;
-    const messageLimit = parseInt(args[args.length - 1]) || 100;
-    const words = FLAGGED_WORDS;
+        const messageLimit: number = args[1]?.value || 100;
+        const words = FLAGGED_WORDS;
 
-    let reportLines = [];
-    let totalFound = 0;
+        let reportLines: string[] = [];
+        let totalFound = 0;
 
-    const statusMsg = await channel.send('Scanning messages...');
+        showToast("Scanning messages...", 0);
 
-    const messageApi = getModule(['fetchMessages'], false);
-    const textChannels = guild.channels.filter(c => c.type === 0 || c.type === 5);
+        const textChannels = guild.channels.filter(
+          (c: any) => c.type === 0 || c.type === 5
+        );
 
-    for (const user of users) {
-      for (const ch of textChannels) {
-        try {
-          const msgs = await messageApi.fetchMessages(ch.id, { limit: messageLimit });
-          const userMsgs = msgs.filter(m => m.author.id === user.id);
+        for (const userId of userIds) {
+          for (const ch of textChannels) {
+            try {
+              const msgs = await messageApi.fetchMessages(ch.id, { limit: messageLimit });
+              const userMsgs = msgs.filter((m: any) => m.author.id === userId);
 
-          for (const m of userMsgs) {
-            const content = m.content.toLowerCase();
-            const foundWord = words.find(w => content.includes(w.toLowerCase()));
-            if (foundWord) {
-              const jumpLink = `https://discord.com/channels/${guild.id}/${ch.id}/${m.id}`;
-              reportLines.push(
-                `**${user.tag}** in #${ch.name}: [Jump](${jumpLink}) <- flagged: \`${foundWord}\``
-              );
-              totalFound++;
-            }
+              for (const m of userMsgs) {
+                const content: string = m.content.toLowerCase();
+                const foundWord = words.find((w) => content.includes(w.toLowerCase()));
+                if (foundWord) {
+                  const jumpLink = `https://discord.com/channels/${guild.id}/${ch.id}/${m.id}`;
+                  reportLines.push(
+                    `<@${userId}> in #${ch.name}: [Jump](${jumpLink}) <- flagged: \`${foundWord}\``
+                  );
+                  totalFound++;
+                }
+              }
+            } catch (e) {}
           }
-        } catch (e) {}
+        }
+
+        if (reportLines.length === 0) {
+          showToast(`No flagged messages found in the last ${messageLimit} messages per channel.`, 0);
+          return;
+        }
+
+        const chunks = chunkArray(reportLines, 20);
+        for (const chunk of chunks) {
+          await ctx.channel.send({
+            embeds: [
+              {
+                title: "Flagged Messages Report",
+                description: chunk.join("\n"),
+                color: 0xff0000,
+                footer: { text: `Total results: ${totalFound}` }
+              }
+            ]
+          });
+        }
       }
-    }
-
-    statusMsg.delete().catch(() => {});
-
-    if (reportLines.length === 0) {
-      return {
-        send: true,
-        result: `No flagged messages found in the last ${messageLimit} messages per channel.`
-      };
-    }
-
-    const chunks = chunkArray(reportLines, 20);
-    for (const chunk of chunks) {
-      const embed = {
-        title: 'Flagged Messages Report',
-        description: chunk.join('\n'),
-        color: 0xff0000,
-        footer: { text: `Total results: ${totalFound}` }
-      };
-      await channel.send({ embed });
-    }
-
-    return { send: false, result: null };
+    });
+  },
+  onUnload: () => {
+    commands.unregisterCommand("sweep");
   }
 };
