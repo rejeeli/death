@@ -3,6 +3,7 @@ import { findByProps } from "@vendetta/metro";
 import { showToast } from "@vendetta/ui/toasts";
 
 const FLAGGED_WORDS: string[] = [
+  // الكلمات الأصلية (250)
   'cp', 'child porn', 'cheese pizza', 'loli', 'shota', 'jailbait',
   'pedo', 'pedophile', 'grooming', 'groomer', 'minor', 'underage',
   'under age', '14 years old', '15 years old', '16 years old',
@@ -101,7 +102,38 @@ const FLAGGED_WORDS: string[] = [
   'hidden love', 'taboo', 'taboo love', 'taboo relationship',
   'illegal love', 'illegal relationship', 'age of consent',
   'consent age', 'legal age', 'barely legal', 'just turned',
-  'just turned 18', 'fresh 18', 'freshly 18', 'newly 18'
+  'just turned 18', 'fresh 18', 'freshly 18', 'newly 18',
+
+  
+  'nsfw', 'not safe for work', 'adult content', 'explicit', 'xxx',
+  'porn', 'porno', 'pornography', 'adult video', 'adult film',
+  'sex tape', 'sex video', 'leaked video', 'leaked pics',
+  'onlyfans leak', 'patreon leak', 'snapchat premium', 'premium snap',
+  'private snap', 'private story', 'close friends', 'cf',
+  'nude', 'nudes', 'naked', 'naked pics', 'dick pic', 'dick pics',
+  'vagina', 'penis', 'boobs', 'tits', 'ass', 'booty',
+  'sexual', 'sexually', 'sex', 'intercourse', 'oral', 'anal',
+  'masturbate', 'masturbation', 'fap', 'fapping', 'cum', 'cumming',
+  'orgasm', 'orgy', 'threesome', 'gangbang', 'bdsm', 'bondage',
+  'domination', 'submission', 'dominant', 'submissive', 'sadism',
+  'masochism', 'fetish', 'kink', 'kinky', 'roleplay', 'rp',
+  'catfish', 'catfishing', 'impersonate', 'fake profile', 'fake pic',
+  'stolen pics', 'stolen photos', 'hack', 'hacked', 'hacker',
+  'phish', 'phishing', 'login', 'password', 'token', 'token grabber',
+  'grabber', 'malware', 'virus', 'rat', 'remote access', 'keylogger',
+  'webcam hack', 'cam hack', 'record you', 'screen record',
+  'location', 'track you', 'find you', 'ip address', 'ip grabber',
+  'doxbin', 'doxxed', 'doxxing', 'exposed', 'exposed pics',
+  'revenge porn', 'blackmail you', 'extort', 'extortion',
+  'pay me', 'ransom', 'ransomware', 'send money', 'gift card code',
+  'bitcoin', 'crypto', 'wallet', 'bank account', 'credit card',
+  'debit card', 'card number', 'cvv', 'ssn', 'social security',
+  'id card', 'passport', 'license', 'personal info', 'dox info',
+  'full address', 'home address', 'school name', 'work address',
+  'family member', 'sibling', 'brother', 'sister', 'mother', 'father',
+  'parent', 'parents', 'guardian', 'carer', 'teacher', 'principal',
+  'coach', 'doctor', 'therapist', 'counselor', 'social worker',
+  'police', 'fbi', 'cybertip', 'report', 'authorities'
 ];
 
 const log = (...args: any[]) => console.log("[Sniper]", ...args);
@@ -119,8 +151,6 @@ let unregister: (() => void) | null = null;
 
 export default {
   onLoad() {
-    log("Loading Sniper plugin...");
-
     unregister = registerCommand({
       name: "snipe",
       displayName: "snipe",
@@ -147,143 +177,66 @@ export default {
       execute: async (args: any[], ctx: any) => {
         try {
           const channel = ctx?.channel;
-          if (!channel?.id) {
-            return { content: "❌ Channel not found." };
-          }
+          if (!channel?.id) return { content: "❌ Channel not found." };
 
           const userId = args[0]?.value;
-          if (!userId) {
-            return { content: "❌ Please mention a user." };
-          }
+          if (!userId) return { content: "❌ Please mention a user." };
 
           const messageLimit = Math.min(args[1]?.value || 500, 10000000000);
           showToast(`Scanning...`, 0);
 
-          // ============ تشخيص ============
-          log(`Channel ID: ${channel.id}`);
-          log(`User ID: ${userId}`);
-          log(`Limit: ${messageLimit}`);
+          const http = findByProps("get", "post", "put", "patch", "delete");
+          if (!http || !http.get) return { content: "❌ Internal HTTP module not found." };
 
-          // 1. جرب fetchMessages من عدة أماكن
-          const sources = [
-            findByProps("fetchMessages"),
-            findByProps("getMessages"),
-            findByProps("fetchMessages", "ack"),
-            findByProps("fetchMessages", "sendMessage"),
-          ];
-
-          let fetchFn: Function | null = null;
-          let sourceName = "";
-
-          for (const src of sources) {
-            if (!src) continue;
-            const keys = Object.keys(src);
-            log(`Source keys: ${keys.filter(k => k.toLowerCase().includes("message") || k.toLowerCase().includes("fetch")).join(", ")}`);
-            
-            for (const key of keys) {
-              if (typeof src[key] === "function" && (key.includes("fetchMessages") || key.includes("getMessages"))) {
-                fetchFn = src[key].bind(src);
-                sourceName = key;
-                log(`✅ Found function: ${key}`);
-                break;
-              }
-            }
-            if (fetchFn) break;
-          }
-
-          if (!fetchFn) {
-            logError("❌ No fetch function found in any module");
-            return { content: "❌ No fetch function found. Check console." };
-          }
-
-          // 2. استدعاء fetchMessages
           let allMsgs: any[] = [];
           let beforeId: string | null = null;
-          let totalBatches = 0;
 
           while (allMsgs.length < messageLimit) {
             const batchLimit = Math.min(100, messageLimit - allMsgs.length);
-            const options: any = { limit: batchLimit };
-            if (beforeId) options.before = beforeId;
-
-            log(`Fetching batch ${++totalBatches}: limit=${batchLimit}, before=${beforeId || "none"}`);
+            let url = `/channels/${channel.id}/messages?limit=${batchLimit}`;
+            if (beforeId) url += `&before=${beforeId}`;
 
             try {
-              const batch = await fetchFn(channel.id, options);
-              
-              if (!batch) {
-                log(`❌ Batch returned null/undefined`);
-                break;
-              }
-              if (!Array.isArray(batch)) {
-                log(`❌ Batch is not array, it's ${typeof batch}:`, batch);
-                break;
-              }
-              if (batch.length === 0) {
-                log(`✅ Reached end of channel (empty batch)`);
-                break;
-              }
+              const response = await http.get({ url, retries: 0 });
+              const batch = response?.body || response?.data || [];
+
+              if (!Array.isArray(batch) || batch.length === 0) break;
 
               allMsgs = allMsgs.concat(batch);
               beforeId = batch[batch.length - 1]?.id;
-              log(`Batch ${totalBatches}: got ${batch.length} msgs, total: ${allMsgs.length}`);
-              
-              if (batch.length < batchLimit) {
-                log(`Batch smaller than limit, assuming end of channel.`);
-                break;
-              }
-            } catch (e: any) {
-              logError(`❌ Fetch error in batch ${totalBatches}:`, e?.message, e?.stack);
+
+              if (batch.length < batchLimit) break;
+            } catch (e) {
+              logError("HTTP get error:", e);
               break;
             }
           }
 
-          log(`=================================`);
-          log(`Total messages fetched: ${allMsgs.length}`);
-          log(`Total batches: ${totalBatches}`);
-
-          // 3. فلترة رسائل المستخدم
-          const userMsgs = allMsgs.filter((m: any) => {
-            const authorId = m?.author?.id || m?.author_id || m?.author?.user_id || "";
-            return authorId === userId;
-          });
-
-          log(`Messages from user ${userId}: ${userMsgs.length}`);
-
-          // 4. فحص الكلمات
+          const userMsgs = allMsgs.filter((m: any) => m?.author?.id === userId);
           let reportLines: string[] = [];
+
           for (const m of userMsgs) {
-            const msgContent = m?.content || "";
-            if (!msgContent) continue;
-            
-            const contentLower = msgContent.toLowerCase();
-            const foundWord = FLAGGED_WORDS.find((w) => contentLower.includes(w.toLowerCase()));
-            
-            if (foundWord) {
+            const content = (m?.content || "").toLowerCase();
+            const found = FLAGGED_WORDS.find(w => content.includes(w.toLowerCase()));
+            if (found) {
               const guildId = ctx?.guild?.id || "@me";
-              const jumpLink = `https://discord.com/channels/${guildId}/${channel.id}/${m.id}`;
-              reportLines.push(
-                `<@${userId}>: [Jump](${jumpLink}) - \`${foundWord}\``
-              );
+              const link = `https://discord.com/channels/${guildId}/${channel.id}/${m.id}`;
+              reportLines.push(`<@${userId}>: [Jump](${link}) - \`${found}\``);
             }
           }
 
-          log(`Flagged messages found: ${reportLines.length}`);
-
           if (reportLines.length === 0) {
-            return { content: `✅ No flagged messages found.\nScanned: ${allMsgs.length} msgs, ${userMsgs.length} from user.\nSource: ${sourceName}` };
+            return { content: `✅ No flagged messages found.\nScanned: ${allMsgs.length} msgs, ${userMsgs.length} from user.` };
           }
 
           const chunks = chunkArray(reportLines, 15);
           let fullReport = chunks[0].join("\n");
-          if (chunks.length > 1) {
-            fullReport += `\n\n... and ${reportLines.length - 15} more results.`;
-          }
-
+          if (chunks.length > 1) fullReport += `\n\n... and ${reportLines.length - 15} more results.`;
+          
           return { content: fullReport };
 
         } catch (err: any) {
-          logError("FATAL Error:", err?.message, err?.stack);
+          logError("Error:", err?.message);
           return { content: `❌ ${err?.message || "Unknown error"}` };
         }
       },
