@@ -1,5 +1,5 @@
 import { registerCommand } from "@vendetta/commands";
-import { findByProps } from "@vendetta/metro";
+import { findByProps, findByStoreName } from "@vendetta/metro";
 import { showToast } from "@vendetta/ui/toasts";
 
 const FLAGGED_WORDS: string[] = [
@@ -115,88 +115,6 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-const fetchMessagesREST = async (channelId: string, limit: number, before?: string | null): Promise<any[]> => {
-  try {
-    let token = null;
-    
-    try {
-      const authModule = findByProps("getToken");
-      if (authModule?.getToken) token = authModule.getToken();
-    } catch {}
-    
-    if (!token) {
-      try {
-        const g = globalThis as any;
-        if (g?.token) token = g.token;
-      } catch {}
-    }
-
-    if (!token) {
-      logError("No token found for REST API");
-      return [];
-    }
-
-    let url = `https://discord.com/api/v9/channels/${channelId}/messages?limit=${limit}`;
-    if (before) url += `&before=${before}`;
-
-    const res = await fetch(url, {
-      headers: { Authorization: token },
-    });
-
-    if (!res.ok) {
-      logError(`REST API error: ${res.status} ${res.statusText}`);
-      return [];
-    }
-
-    const data = await res.json();
-    log(`REST fetched: ${data?.length || 0} messages`);
-    return Array.isArray(data) ? data : [];
-  } catch (e: any) {
-    logError("REST fetch error:", e?.message);
-    return [];
-  }
-};
-
-const getMessageActions = () => {
-  const g = (globalThis as any);
-  if (g?.MessageActions && typeof g.MessageActions === "object") return g.MessageActions;
-  const bySendOnly = findByProps("sendMessage");
-  if (bySendOnly) return bySendOnly;
-  const bySendReceive = findByProps("sendMessage", "receiveMessage");
-  if (bySendReceive) return bySendReceive;
-  const byCreate = findByProps("createMessage", "getMessages");
-  if (byCreate) return byCreate;
-  return null;
-};
-
-const sendMessageAggressive = async (channelId: string, content: string): Promise<boolean> => {
-  const MA = getMessageActions();
-  if (!MA) return false;
-
-  const msgObj = { content };
-  const nonce = Date.now().toString();
-
-  const attempts = [
-    () => MA.sendMessage?.(channelId, msgObj),
-    () => MA.sendMessage?.(channelId, msgObj, true),
-    () => MA.sendMessage?.(channelId, msgObj, undefined, { nonce }),
-    () => MA.createMessage?.(channelId, msgObj),
-    () => MA.createMessage?.(channelId, content),
-    () => MA.createMessage?.(channelId, msgObj, undefined, { nonce }),
-    () => MA.sendMessage?.(channelId, content),
-    () => MA.sendMessage?.(channelId, content, true),
-  ];
-
-  for (const attempt of attempts) {
-    try {
-      const res = attempt();
-      if (res && typeof res.then === "function") await res;
-      return true;
-    } catch {}
-  }
-  return false;
-};
-
 let unregister: (() => void) | null = null;
 
 export default {
@@ -241,23 +159,34 @@ export default {
           const messageLimit = Math.min(args[1]?.value || 500, 10000000000);
           showToast(`Scanning...`, 0);
 
-          let allMsgs: any[] = [];
-          let beforeId: string | null = null;
-
-          while (allMsgs.length < messageLimit) {
-            const batchLimit = Math.min(100, messageLimit - allMsgs.length);
-            let batch = await fetchMessagesREST(channel.id, batchLimit, beforeId);
-            
-            if (batch.length === 0) break;
-            allMsgs = allMsgs.concat(batch);
-            beforeId = batch[batch.length - 1]?.id;
-            if (batch.length < batchLimit) break;
+          // استخدام MessageStore الداخلي لجلب الرسائل
+          const MessageStore = findByStoreName("MessageStore");
+          if (!MessageStore) {
+            return { content: "❌ Could not access MessageStore." };
           }
 
-          const userMsgs = allMsgs.filter((m: any) => {
-            const authorId = m?.author?.id || m?.author_id || m?.author?.user_id || "";
-            return authorId === userId;
-          });
+          // الحصول على جميع رسائل القناة المخزنة محلياً
+          let allMsgs: any[] = [];
+          
+          try {
+            const messages = MessageStore.getMessages(channel.id);
+            if (messages) {
+              allMsgs = messages.toArray?.() || Object.values(messages) || [];
+            }
+          } catch (e) {
+            logError("Error getting messages from store:", e);
+            return { content: "❌ Could not read messages." };
+          }
+
+          // ترتيب الرسائل تنازلياً حسب التاريخ واقتصاص العدد المطلوب
+          allMsgs.sort((a: any, b: any) => (b?.timestamp || 0) - (a?.timestamp || 0));
+          allMsgs = allMsgs.slice(0, messageLimit);
+
+          log(`Fetched ${allMsgs.length} messages from MessageStore`);
+
+          // فلترة رسائل المستخدم
+          const userMsgs = allMsgs.filter((m: any) => m?.author?.id === userId);
+          log(`User ${userId} messages: ${userMsgs.length}`);
 
           let reportLines: string[] = [];
 
@@ -277,18 +206,20 @@ export default {
             }
           }
 
+          log(`Flagged messages found: ${reportLines.length}`);
+
           if (reportLines.length === 0) {
-            const debugMsg = `✅ No flagged messages found.\nScanned: ${allMsgs.length} msgs, ${userMsgs.length} from user.`;
-            await sendMessageAggressive(channel.id, debugMsg);
-            return { content: "" };
+            return { content: `✅ No flagged messages found.\nScanned: ${allMsgs.length} msgs, ${userMsgs.length} from user.` };
           }
 
           const chunks = chunkArray(reportLines, 15);
-          for (const chunk of chunks) {
-            await sendMessageAggressive(channel.id, chunk.join("\n"));
+          let fullReport = chunks[0].join("\n");
+          
+          if (chunks.length > 1) {
+            fullReport += `\n\n... and ${reportLines.length - 15} more results.`;
           }
 
-          return { content: "" };
+          return { content: fullReport };
 
         } catch (err: any) {
           logError("Error:", err?.message, err?.stack);
