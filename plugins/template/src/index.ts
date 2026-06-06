@@ -278,11 +278,7 @@ export default {
 
           const textChannels = getTextChannels(guild.id);
           
-          if (textChannels.length === 0) {
-            log("Guild ID:", guild.id);
-            showToast("No text channels found. Check console.", 1);
-            return { content: "❌ No text channels found. Check console logs for debug info.", ephemeral: true };
-          }
+          
 
           showToast(`Scanning ${textChannels.length} channels...`, 0);
 
