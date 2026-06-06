@@ -115,31 +115,6 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-// البحث عن دالة fetchMessages الداخلية
-const findFetchMessages = () => {
-  // جرب جميع الكائنات التي تحتوي fetchMessages
-  const modules = [
-    findByProps("fetchMessages"),
-    findByProps("getMessages"),
-    findByProps("fetchMessages", "sendMessage"),
-    findByProps("getMessages", "fetchMessages"),
-  ];
-
-  for (const mod of modules) {
-    if (!mod) continue;
-    const keys = Object.keys(mod);
-    log(`Module keys: ${keys.filter(k => k.toLowerCase().includes("message") || k.toLowerCase().includes("fetch")).join(", ")}`);
-    
-    for (const key of keys) {
-      if (typeof mod[key] === "function" && (key.includes("fetchMessages") || key.includes("getMessages"))) {
-        log(`Found function: ${key}`);
-        return mod[key].bind(mod);
-      }
-    }
-  }
-  return null;
-};
-
 let unregister: (() => void) | null = null;
 
 export default {
@@ -184,48 +159,99 @@ export default {
           const messageLimit = Math.min(args[1]?.value || 500, 10000000000);
           showToast(`Scanning...`, 0);
 
-          const fetchMessages = findFetchMessages();
-          
-          if (!fetchMessages) {
-            logError("fetchMessages not found in any module");
-            return { content: "❌ Could not find message fetch function. Open console for details." };
+          // ============ تشخيص ============
+          log(`Channel ID: ${channel.id}`);
+          log(`User ID: ${userId}`);
+          log(`Limit: ${messageLimit}`);
+
+          // 1. جرب fetchMessages من عدة أماكن
+          const sources = [
+            findByProps("fetchMessages"),
+            findByProps("getMessages"),
+            findByProps("fetchMessages", "ack"),
+            findByProps("fetchMessages", "sendMessage"),
+          ];
+
+          let fetchFn: Function | null = null;
+          let sourceName = "";
+
+          for (const src of sources) {
+            if (!src) continue;
+            const keys = Object.keys(src);
+            log(`Source keys: ${keys.filter(k => k.toLowerCase().includes("message") || k.toLowerCase().includes("fetch")).join(", ")}`);
+            
+            for (const key of keys) {
+              if (typeof src[key] === "function" && (key.includes("fetchMessages") || key.includes("getMessages"))) {
+                fetchFn = src[key].bind(src);
+                sourceName = key;
+                log(`✅ Found function: ${key}`);
+                break;
+              }
+            }
+            if (fetchFn) break;
           }
 
-          log(`Using fetchMessages function`);
+          if (!fetchFn) {
+            logError("❌ No fetch function found in any module");
+            return { content: "❌ No fetch function found. Check console." };
+          }
 
+          // 2. استدعاء fetchMessages
           let allMsgs: any[] = [];
           let beforeId: string | null = null;
+          let totalBatches = 0;
 
-          // جلب الرسائل على دفعات
           while (allMsgs.length < messageLimit) {
             const batchLimit = Math.min(100, messageLimit - allMsgs.length);
             const options: any = { limit: batchLimit };
             if (beforeId) options.before = beforeId;
 
+            log(`Fetching batch ${++totalBatches}: limit=${batchLimit}, before=${beforeId || "none"}`);
+
             try {
-              const batch = await fetchMessages(channel.id, options);
+              const batch = await fetchFn(channel.id, options);
               
-              if (!batch || !Array.isArray(batch) || batch.length === 0) break;
+              if (!batch) {
+                log(`❌ Batch returned null/undefined`);
+                break;
+              }
+              if (!Array.isArray(batch)) {
+                log(`❌ Batch is not array, it's ${typeof batch}:`, batch);
+                break;
+              }
+              if (batch.length === 0) {
+                log(`✅ Reached end of channel (empty batch)`);
+                break;
+              }
 
               allMsgs = allMsgs.concat(batch);
               beforeId = batch[batch.length - 1]?.id;
+              log(`Batch ${totalBatches}: got ${batch.length} msgs, total: ${allMsgs.length}`);
               
-              log(`Batch: ${batch.length}, Total: ${allMsgs.length}`);
-              
-              if (batch.length < batchLimit) break;
+              if (batch.length < batchLimit) {
+                log(`Batch smaller than limit, assuming end of channel.`);
+                break;
+              }
             } catch (e: any) {
-              logError("Fetch error:", e?.message);
+              logError(`❌ Fetch error in batch ${totalBatches}:`, e?.message, e?.stack);
               break;
             }
           }
 
-          log(`Total fetched: ${allMsgs.length} messages`);
+          log(`=================================`);
+          log(`Total messages fetched: ${allMsgs.length}`);
+          log(`Total batches: ${totalBatches}`);
 
-          const userMsgs = allMsgs.filter((m: any) => m?.author?.id === userId);
-          log(`User ${userId} messages: ${userMsgs.length}`);
+          // 3. فلترة رسائل المستخدم
+          const userMsgs = allMsgs.filter((m: any) => {
+            const authorId = m?.author?.id || m?.author_id || m?.author?.user_id || "";
+            return authorId === userId;
+          });
 
+          log(`Messages from user ${userId}: ${userMsgs.length}`);
+
+          // 4. فحص الكلمات
           let reportLines: string[] = [];
-
           for (const m of userMsgs) {
             const msgContent = m?.content || "";
             if (!msgContent) continue;
@@ -245,12 +271,11 @@ export default {
           log(`Flagged messages found: ${reportLines.length}`);
 
           if (reportLines.length === 0) {
-            return { content: `✅ No flagged messages found.\nScanned: ${allMsgs.length} msgs, ${userMsgs.length} from user.` };
+            return { content: `✅ No flagged messages found.\nScanned: ${allMsgs.length} msgs, ${userMsgs.length} from user.\nSource: ${sourceName}` };
           }
 
           const chunks = chunkArray(reportLines, 15);
           let fullReport = chunks[0].join("\n");
-          
           if (chunks.length > 1) {
             fullReport += `\n\n... and ${reportLines.length - 15} more results.`;
           }
@@ -258,7 +283,7 @@ export default {
           return { content: fullReport };
 
         } catch (err: any) {
-          logError("Error:", err?.message, err?.stack);
+          logError("FATAL Error:", err?.message, err?.stack);
           return { content: `❌ ${err?.message || "Unknown error"}` };
         }
       },
