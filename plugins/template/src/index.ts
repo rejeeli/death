@@ -104,7 +104,7 @@ const FLAGGED_WORDS: string[] = [
   'consent age', 'legal age', 'barely legal', 'just turned',
   'just turned 18', 'fresh 18', 'freshly 18', 'newly 18',
 
-  
+  // الكلمات الإضافية لتصل إلى 400
   'nsfw', 'not safe for work', 'adult content', 'explicit', 'xxx',
   'porn', 'porno', 'pornography', 'adult video', 'adult film',
   'sex tape', 'sex video', 'leaked video', 'leaked pics',
