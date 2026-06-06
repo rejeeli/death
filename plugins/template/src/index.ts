@@ -116,7 +116,6 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return chunks;
 }
 
-// دالة إرسال قوية تجرب عدة طرق (مأخوذة من إضافة AnimalCommands)
 const getMessageActions = () => {
   const g = (globalThis as any);
   if (g?.MessageActions && typeof g.MessageActions === "object") return g.MessageActions;
@@ -129,9 +128,9 @@ const getMessageActions = () => {
   return null;
 };
 
-const sendMessageAggressive = async (channelId: string, content: string): Promise<boolean> => {
+const sendMessageAggressive = async (channelId: string, content: string): Promise<{ success: boolean; method?: string; error?: string }> => {
   const MA = getMessageActions();
-  if (!MA) return false;
+  if (!MA) return { success: false, error: "MessageActions not found" };
 
   const msgObj = { content };
   const nonce = Date.now().toString();
@@ -149,6 +148,7 @@ const sendMessageAggressive = async (channelId: string, content: string): Promis
     { fn: () => (MA?.dispatch ? MA.dispatch({ type: "CREATE_MESSAGE", channelId, message: msgObj }) : undefined), name: "MA.dispatch(CREATE_MESSAGE)" },
   ];
 
+  let lastError = "";
   for (const attempt of attempts) {
     try {
       const res = attempt.fn();
@@ -156,12 +156,13 @@ const sendMessageAggressive = async (channelId: string, content: string): Promis
         await res;
       }
       log(`Message sent via: ${attempt.name}`);
-      return true;
-    } catch (err) {
-      // تجاهل الخطأ وجرب الطريقة التالية
+      return { success: true, method: attempt.name };
+    } catch (err: any) {
+      lastError = `${attempt.name}: ${err?.message || String(err)}`;
+      logError("Send attempt failed:", lastError);
     }
   }
-  return false;
+  return { success: false, error: `All attempts failed. Last error: ${lastError}` };
 };
 
 let unregister: (() => void) | null = null;
@@ -195,50 +196,97 @@ export default {
       ],
       execute: async (args: any[], ctx: any) => {
         try {
+          // التحقق من القناة
           const channel = ctx?.channel;
-          if (!channel?.id) {
-            showToast("Could not find channel.", 1);
-            return { content: "❌ Could not find channel.", ephemeral: true };
+          if (!channel) {
+            const errMsg = "ERROR: ctx.channel is undefined. Are you in a channel?";
+            logError(errMsg);
+            showToast(errMsg, 1);
+            return { content: `❌ ${errMsg}`, ephemeral: true };
+          }
+          if (!channel.id) {
+            const errMsg = "ERROR: ctx.channel.id is undefined.";
+            logError(errMsg);
+            showToast(errMsg, 1);
+            return { content: `❌ ${errMsg}`, ephemeral: true };
           }
 
+          // التحقق من المستخدم
           const userId = args[0]?.value;
           if (!userId) {
-            showToast("Please mention a user.", 1);
-            return { content: "❌ Please mention a user.", ephemeral: true };
+            const errMsg = "ERROR: No user mentioned. args[0].value is empty.";
+            logError(errMsg);
+            showToast(errMsg, 1);
+            return { content: `❌ ${errMsg}`, ephemeral: true };
           }
 
           const messageLimit = Math.min(args[1]?.value || 500, 5000);
+          log(`Starting scan: channel=${channel.id}, user=${userId}, limit=${messageLimit}`);
 
           showToast(`Scanning ${messageLimit} messages...`, 0);
 
+          // البحث عن messageApi
           const messageApi = findByProps("fetchMessages");
-          if (!messageApi?.fetchMessages) {
-            showToast("Could not access message API.", 1);
-            return { content: "❌ Could not access message API.", ephemeral: true };
+          if (!messageApi) {
+            const errMsg = "ERROR: findByProps('fetchMessages') returned null.";
+            logError(errMsg);
+            showToast(errMsg, 1);
+            return { content: `❌ ${errMsg}`, ephemeral: true };
+          }
+          if (!messageApi.fetchMessages) {
+            const availableKeys = Object.keys(messageApi).filter(k => k.toLowerCase().includes("message") || k.toLowerCase().includes("fetch"));
+            const errMsg = `ERROR: fetchMessages not found. Available keys: ${availableKeys.join(", ") || "none"}`;
+            logError(errMsg);
+            showToast(errMsg, 1);
+            return { content: `❌ ${errMsg}`, ephemeral: true };
           }
 
           let allMsgs: any[] = [];
           let beforeId: string | null = null;
+          let fetchError = "";
 
           // جلب الرسائل
-          while (allMsgs.length < messageLimit) {
-            const batchLimit = Math.min(100, messageLimit - allMsgs.length);
-            const options: any = { limit: batchLimit };
-            if (beforeId) options.before = beforeId;
+          try {
+            while (allMsgs.length < messageLimit) {
+              const batchLimit = Math.min(100, messageLimit - allMsgs.length);
+              const options: any = { limit: batchLimit };
+              if (beforeId) options.before = beforeId;
 
-            const batch = await messageApi.fetchMessages(channel.id, options);
-            if (!batch || !Array.isArray(batch) || batch.length === 0) break;
+              log(`Fetching batch: limit=${batchLimit}, before=${beforeId || "none"}`);
+              const batch = await messageApi.fetchMessages(channel.id, options);
 
-            allMsgs = allMsgs.concat(batch);
-            beforeId = batch[batch.length - 1]?.id;
-            if (batch.length < batchLimit) break;
+              if (!batch) {
+                fetchError = "fetchMessages returned null/undefined";
+                break;
+              }
+              if (!Array.isArray(batch)) {
+                fetchError = `fetchMessages returned non-array: ${typeof batch}`;
+                break;
+              }
+              if (batch.length === 0) break;
+
+              allMsgs = allMsgs.concat(batch);
+              beforeId = batch[batch.length - 1]?.id;
+              log(`Batch fetched: ${batch.length} messages, total: ${allMsgs.length}`);
+
+              if (batch.length < batchLimit) break;
+            }
+          } catch (e: any) {
+            fetchError = e?.message || String(e);
+            logError("Fetch error:", fetchError);
           }
 
-          log(`Fetched ${allMsgs.length} messages`);
+          if (fetchError && allMsgs.length === 0) {
+            const errMsg = `ERROR fetching messages: ${fetchError}`;
+            showToast(errMsg, 1);
+            return { content: `❌ ${errMsg}`, ephemeral: true };
+          }
 
-          // فلترة رسائل المستخدم المحدد
+          log(`Total fetched: ${allMsgs.length} messages`);
+
+          // فلترة رسائل المستخدم
           const userMsgs = allMsgs.filter((m: any) => m?.author?.id === userId);
-          log(`User ${userId} has ${userMsgs.length} messages in this channel`);
+          log(`User ${userId} has ${userMsgs.length} messages`);
 
           let reportLines: string[] = [];
           const words = FLAGGED_WORDS;
@@ -256,30 +304,43 @@ export default {
             }
           }
 
+          log(`Found ${reportLines.length} flagged messages`);
+
+          // إرسال النتائج
           if (reportLines.length === 0) {
-            await sendMessageAggressive(channel.id, "✅ No flagged messages found.");
-            // نخفي الرد التلقائي لأنه تم الإرسال يدوياً
+            const result = await sendMessageAggressive(channel.id, "✅ No flagged messages found.");
+            if (!result.success) {
+              const errMsg = `ERROR sending "no results" message: ${result.error}`;
+              logError(errMsg);
+              showToast(errMsg, 1);
+              return { content: `❌ ${errMsg}`, ephemeral: true };
+            }
             return { content: "", ephemeral: true };
           }
 
-          // تقسيم النتائج لرسائل متعددة (لتجنب حدود الطول)
           const chunks = chunkArray(reportLines, 15);
-          for (const chunk of chunks) {
+          log(`Sending ${chunks.length} report chunks`);
+
+          for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i];
             const msgContent = chunk.join("\n");
-            const sent = await sendMessageAggressive(channel.id, msgContent);
-            if (!sent) {
-              showToast("Failed to send report message.", 1);
-              return { content: "❌ Failed to send report.", ephemeral: true };
+            const result = await sendMessageAggressive(channel.id, msgContent);
+            if (!result.success) {
+              const errMsg = `ERROR sending chunk ${i + 1}/${chunks.length}: ${result.error}`;
+              logError(errMsg);
+              showToast(errMsg, 1);
+              return { content: `❌ ${errMsg}`, ephemeral: true };
             }
           }
 
-          // لا نرسل شيئاً في الرد الظاهري
+          log("Scan complete, all messages sent");
           return { content: "", ephemeral: true };
 
-        } catch (err) {
-          logError("Snipe command error:", err);
-          showToast("An error occurred.", 1);
-          return { content: "❌ Error during scan.", ephemeral: true };
+        } catch (err: any) {
+          const fullError = `UNEXPECTED ERROR: ${err?.message || String(err)}\nStack: ${err?.stack || "no stack"}`;
+          logError(fullError);
+          showToast(fullError, 1);
+          return { content: `❌ ${fullError}`, ephemeral: true };
         }
       },
     });
